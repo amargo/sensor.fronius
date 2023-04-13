@@ -25,7 +25,8 @@ from homeassistant.util.dt import utcnow as dt_utcnow, as_local
 from homeassistant.util import dt as dt_util
 from homeassistant.helpers.sun import get_astral_event_date
 
-_INVERTERRT_URL = 'http://{}/solar_api/v1/GetInverterRealtimeData.cgi?Scope={}&DeviceId={}&DataCollection=CommonInverterData'
+# _INVERTERRT_URL = 'http://{}/solar_api/v1/GetInverterRealtimeData.cgi?Scope={}&DeviceId={}&DataCollection=CommonInverterData'
+_INVERTERRT_URL = 'http://{}/solar_api/v1/GetInverterRealtimeData.cgi?Scope={}&DeviceId={}&DataCollection={}'
 _POWERFLOW_URL = 'http://{}/solar_api/v1/GetPowerFlowRealtimeData.fcgi'
 _METER_URL = 'http://{}/solar_api/v1/GetMeterRealtimeData.cgi?Scope={}&DeviceId={}'
 #_INVERTERRT_URL = 'http://{}{}?DeviceId={}&DataCollection=CommonInverterData'
@@ -60,7 +61,13 @@ SENSOR_TYPES = {
     'ac_power': ['inverter', True, 'PAC', 'AC Power', 'W', 'power', 'mdi:solar-power'],
     'day_energy': ['inverter', True, 'DAY_ENERGY', 'Day Energy', 'kWh', 'energy', 'mdi:solar-power'],
     'ac_current': ['inverter', False, 'IAC', 'AC Current', 'A', False, 'mdi:solar-power'],
+    'ac_1': ['ppp_inverter', False, 'IAC_L1', 'AC_1', 'A', False, 'mdi:solar-power'],
+    'ac_2': ['ppp_inverter', False, 'IAC_L2', 'AC_2', 'A', False, 'mdi:solar-power'],
+    'ac_3': ['ppp_inverter', False, 'IAC_L2', 'AC_3', 'A', False, 'mdi:solar-power'],
     'ac_voltage': ['inverter', False, 'UAC', 'AC Voltage', 'V', False, 'mdi:solar-power'],
+    'ac_1_voltage': ['ppp_inverter', False, 'UAC_L1', 'AC_1 Voltage', 'V', False, 'mdi:solar-power'],
+    'ac_2_voltage': ['ppp_inverter', False, 'UAC_L2', 'AC_2 Voltage', 'V', False, 'mdi:solar-power'],
+    'ac_3_voltage': ['ppp_inverter', False, 'UAC_L3', 'AC_3 Voltage', 'V', False, 'mdi:solar-power'],
     'ac_frequency': ['inverter', False, 'FAC', 'AC Frequency', 'Hz', False, 'mdi:solar-power'],
     'dc_current': ['inverter', False, 'IDC', 'DC Current', 'A', False, 'mdi:solar-power'],
     'dc_voltage': ['inverter', False, 'UDC', 'DC Voltage', 'V', False, 'mdi:solar-power'],
@@ -136,13 +143,16 @@ async def async_setup_platform(hass, config, async_add_entities, discovery_info=
     _LOGGER.debug(SENSOR_TYPES)
 
     fetchers = []
-    inverter_data = InverterData(session, ip_address, device_id, scope)
+    inverter_data = InverterData(session, ip_address, device_id, 'CommonInverterData', scope)
     fetchers.append(inverter_data)
+    ppp_inverter_data = InverterData(session, ip_address, device_id, '3PInverterData', scope)
+    fetchers.append(ppp_inverter_data)
+    
     if powerflow:
-        powerflow_data = PowerflowData(session, ip_address, None, None)
+        powerflow_data = PowerflowData(session, ip_address, None, None, None)
         fetchers.append(powerflow_data)
     if smartmeter:
-        smartmeter_data = SmartMeterData(session, ip_address, smartmeter_device_id, "Device")
+        smartmeter_data = SmartMeterData(session, ip_address, smartmeter_device_id, None, "Device")
         fetchers.append(smartmeter_data)
 
     def fetch_executor(fetcher):
@@ -174,6 +184,10 @@ async def async_setup_platform(hass, config, async_add_entities, discovery_info=
         if device == "inverter":
             _LOGGER.debug("Adding inverter sensor: {}, {}, {}, {}, {}, {}, {}, {}".format(inverter_data, name, variable, scope, sensor_units, device_id, powerflow, smartmeter))
             dev.append(FroniusSensor(inverter_data, name, variable, scope, sensor_units, device_id, powerflow, smartmeter, always_log))
+
+        if device == "ppp_inverter":
+            _LOGGER.debug("Adding ppp_inverter sensor: {}, {}, {}, {}, {}, {}, {}, {}".format(inverter_data, name, variable, scope, sensor_units, device_id, powerflow, smartmeter))
+            dev.append(FroniusSensor(ppp_inverter_data, name, variable, scope, sensor_units, device_id, powerflow, smartmeter, always_log))
 
         elif device == "powerflow" and powerflow:
             _LOGGER.debug("Adding powerflow sensor: {}, {}, {}, {}, {}, {}, {}, {}".format(powerflow_data, name, variable, scope, sensor_units, device_id, powerflow, smartmeter))
@@ -284,7 +298,7 @@ class FroniusSensor(SensorEntity):
         state = None
         if self._data.latest_data and (self._json_key in self._data.latest_data):
             _LOGGER.debug("Device: {}".format(self._device))
-            if self._device == 'inverter':
+            if self._device == 'inverter' or self._device == 'ppp_inverter':
                 # Read data, if a value is 'null' convert it to 0
                 if self._scope == 'Device':
                     state = self._data.latest_data[self._json_key]['Value']
@@ -358,11 +372,12 @@ class FroniusSensor(SensorEntity):
 class FroniusFetcher:
     """Handle Fronius API requests."""
 
-    def __init__(self, session, ip_address, device_id, scope):
+    def __init__(self, session, ip_address, device_id, data_collection, scope):
         """Initialize the data object."""
         self._session = session
         self._ip_address = ip_address
         self._device_id = device_id
+        self._data_collection = data_collection
         self._scope = scope
         self._data = None
         self._sensors = set()
@@ -411,7 +426,7 @@ class InverterData(FroniusFetcher):
 
     def _build_url(self):
         """Build the URL for the requests."""
-        url = _INVERTERRT_URL.format(self._ip_address, self._scope, self._device_id)
+        url = _INVERTERRT_URL.format(self._ip_address, self._scope, self._device_id, self._data_collection)
         _LOGGER.debug("Fronius Inverter URL: %s", url)
         return url
 
@@ -419,6 +434,7 @@ class InverterData(FroniusFetcher):
         """Get the latest data from inverter."""
         _LOGGER.debug("Requesting inverter data")
         self._data = (await self.fetch_data(self._build_url()))['Body']['Data']
+
 
 class PowerflowData(FroniusFetcher):
     """Handle Fronius API object and limit updates."""

@@ -95,6 +95,9 @@ sensor:
       - day_energy
       - year_energy
       - total_energy
+      - ac_1_voltage
+      - ac_2_voltage
+      - ac_3_voltage      
 ```
 
 ```yaml
