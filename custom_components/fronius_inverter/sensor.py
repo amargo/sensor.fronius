@@ -11,13 +11,23 @@ import asyncio
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 import homeassistant.helpers.config_validation as cv
 
-from homeassistant.const import (
-    CONF_MONITORED_CONDITIONS, CONF_NAME, CONF_SCAN_INTERVAL, ATTR_ATTRIBUTION, SUN_EVENT_SUNRISE, SUN_EVENT_SUNSET, STATE_UNAVAILABLE, DEVICE_CLASS_ENERGY, ENERGY_KILO_WATT_HOUR, ENERGY_WATT_HOUR, DEVICE_CLASS_POWER, POWER_KILO_WATT, POWER_WATT, DEVICE_CLASS_CURRENT, DEVICE_CLASS_VOLTAGE
+from homeassistant.components.sensor import (
+    PLATFORM_SCHEMA, SensorEntity, SensorDeviceClass, SensorStateClass
 )
 
-from homeassistant.components.sensor import (
-    PLATFORM_SCHEMA, STATE_CLASS_MEASUREMENT, STATE_CLASS_TOTAL_INCREASING, SensorEntity,
+from homeassistant.const import (
+    CONF_MONITORED_CONDITIONS, CONF_NAME, CONF_SCAN_INTERVAL, ATTR_ATTRIBUTION,
+    SUN_EVENT_SUNRISE, SUN_EVENT_SUNSET, STATE_UNAVAILABLE
 )
+
+STATE_CLASS_MEASUREMENT = SensorStateClass.MEASUREMENT  # Represents instantaneous measurements
+STATE_CLASS_TOTAL_INCREASING = SensorStateClass.TOTAL_INCREASING  # Represents continuously increasing values
+
+# Updated variables with new import locations
+DEVICE_CLASS_POWER = SensorDeviceClass.POWER  # Represents power measurement
+DEVICE_CLASS_ENERGY = SensorDeviceClass.ENERGY  # Represents energy measurement
+DEVICE_CLASS_VOLTAGE = SensorDeviceClass.VOLTAGE  # Represents voltage measurement
+DEVICE_CLASS_CURRENT = SensorDeviceClass.CURRENT  # Represents current measurement
 
 from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.helpers.entity import Entity
