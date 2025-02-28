@@ -1,0 +1,9 @@
+{
+  "name": "Fronius Inverter",
+  "content_in_root": false,
+  "domains": [
+    "sensor"
+  ],
+  "render_readme": true,
+  "homeassistant": "2025.01.0"
+}
