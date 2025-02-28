@@ -1,5 +1,0 @@
-pip>=25,<26
-requests>=2.32.3
-voluptuous>=0.15.2
-aiohttp>=3.11.12
-asyncio>=3.4.3
