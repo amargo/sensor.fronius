@@ -1,6 +1,79 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": [
-    "config:recommended"
+    "config:recommended",
+    "config:best-practices",
+    "group:monorepos",
+    "group:recommended",
+    ":pinDigestsDisabled",
+    "workarounds:all",
+    "abandonments:recommended"
+  ],
+  "timezone": "Europe/Budapest",
+  "schedule": [
+    "after 1am and before 5am on friday"
+  ],
+  "prHourlyLimit": 0,
+  "prConcurrentLimit": 10,
+  "enabledManagers": [
+    "pip_requirements",
+    "github-actions"
+  ],
+  "dependencyDashboard": true,
+  "dependencyDashboardTitle": "📦 Dependency Dashboard",
+  "osvVulnerabilityAlerts": true,
+  "platformAutomerge": true,
+  "vulnerabilityAlerts": {
+    "enabled": true,
+    "automerge": true,
+    "labels": [
+      "security"
+    ]
+  },
+  "packageRules": [
+    {
+      "matchManagers": [
+        "github-actions"
+      ],
+      "pinDigests": false
+    },
+    {
+      "matchManagers": [
+        "pip_requirements"
+      ],
+      "matchUpdateTypes": [
+        "minor"
+      ],
+      "groupName": "🐍 Python minor updates",
+      "automerge": true
+    },
+    {
+      "matchManagers": [
+        "pip_requirements"
+      ],
+      "matchUpdateTypes": [
+        "major"
+      ],
+      "groupName": "🐍 Python major updates",
+      "automerge": false
+    },
+    {
+      "matchManagers": [
+        "github-actions"
+      ],
+      "matchUpdateTypes": [
+        "minor",
+        "patch"
+      ],
+      "groupName": "⚡ GitHub Actions updates",
+      "automerge": true
+    },
+    {
+      "matchUpdateTypes": [
+        "patch"
+      ],
+      "groupName": "🔖 Patch updates",
+      "automerge": true
+    }
   ]
 }
