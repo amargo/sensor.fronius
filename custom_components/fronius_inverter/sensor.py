@@ -386,19 +386,21 @@ class FroniusFetcher:
             error = f"connection error ({type(err).__name__})"
         except asyncio.TimeoutError:
             error = "request timeout"
-        except (ValueError, KeyError, TypeError) as err:
+        except ValueError as err:
+            error = f"invalid response ({err})"
+        except (KeyError, TypeError) as err:
             error = f"invalid response ({type(err).__name__})"
 
         if error is None:
-            if self._failures:
+            if self._failures > 1:
                 _LOGGER.info("%s: connection restored after %d failures", type(self).__name__, self._failures)
             self._failures = 0
             self._available = True
         else:
             self._failures += 1
-            # Log the first failure as a warning, then keep quiet: the Datamanager
-            # is often unreachable at night or during firmware updates
-            log = _LOGGER.warning if self._failures == 1 else _LOGGER.debug
+            # Single misses are common (Datamanager "Transfer timeout"); warn only
+            # once the sensors go unavailable, then keep quiet (night, updates)
+            log = _LOGGER.warning if self._failures == 2 else _LOGGER.debug
             log("%s: failed to update: %s", type(self).__name__, error)
             # Allow one missed poll before marking the sensors unavailable
             if self._failures > 1:
