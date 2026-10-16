@@ -108,4 +108,5 @@ and `error_code` the active error code (0 = none).
 - A failed request is logged once as a warning; sensors become unavailable
   after two consecutive failures and recover automatically.
 - With `always_log: false` the sensors are unavailable between sunset and
-  sunrise instead of reporting the string `unavailable` as a value.
+  sunrise instead of reporting the string `unavailable` as a value; the inverter
+  is not polled then.

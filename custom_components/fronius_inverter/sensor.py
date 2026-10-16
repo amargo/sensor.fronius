@@ -278,8 +278,11 @@ class FroniusSensor(SensorEntity):
     @property
     def available(self):
         """Return True when the last fetch succeeded (and the sun is up, if configured)."""
-        if not self._data.available:
-            return False
+        return self._data.available and self.wants_data
+
+    @property
+    def wants_data(self):
+        """Return False at night when always_log is off (no need to poll then)."""
         if self._always_log or self.hass is None:
             return True
         now = dt_util.now()
@@ -379,6 +382,10 @@ class FroniusFetcher:
 
     async def async_update(self):
         """Retrieve and update latest state."""
+        if self._sensors and not any(sensor.wants_data for sensor in self._sensors):
+            # Night with always_log off: the sensors are unavailable anyway and the
+            # sleeping inverter only answers with errors (status 7/8)
+            return
         error = None
         try:
             await self._update()
