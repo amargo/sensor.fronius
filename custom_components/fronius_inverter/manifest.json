@@ -4,6 +4,6 @@
   "documentation": "https://github.com/amargo/sensor.fronius/blob/master/README.md",
   "dependencies": [],
   "codeowners": ["@amargo"],
-  "requirements": ["requests", "aiohttp", "voluptuous"],
-  "version": "v0.10.0"
+  "requirements": [],
+  "version": "v0.11.0"
 }

@@ -68,6 +68,44 @@ sensor:
       - smartmeter_voltage_ac_phase_three
       - smartmeter_energy_ac_consumed
       - smartmeter_energy_ac_sold
+      - status_code
+      - error_code
+      - string_1_current
+      - string_1_voltage
+      - string_1_power
+      - string_1_day_energy
+      - string_2_current
+      - string_2_voltage
+      - string_2_power
+      - string_2_day_energy
+      - powerstage_temperature
+    strings: false
     smartmeter: false
     smartmeter_device_id: '0'
     always_log: true
+```
+
+## Per-string (MPPT) sensors
+
+The realtime Solar API only reports the summed DC current/voltage. With
+`strings: true` the component also reads the Datamanager archive
+(`GetArchiveData.cgi`, local, no cloud) every 5 minutes and exposes per-MPPT
+current, voltage and power, the daily DC energy per string (integrated from
+the 5 minute samples) and the power stage temperature. The `sample_time`
+attribute shows the timestamp of the archive sample (it lags 0–5 minutes).
+
+Comparing the two strings is the easiest way to find shading, soiling or a
+failing panel/bypass diode: with the same number of panels per string, the
+string currents should track each other in full sun.
+
+## Status sensors
+
+`status_code` reports the inverter state (`Running`, `Standby`, `Error`, ...)
+and `error_code` the active error code (0 = none).
+
+## Behaviour notes
+
+- A failed request is logged once as a warning; sensors become unavailable
+  after two consecutive failures and recover automatically.
+- With `always_log: false` the sensors are unavailable between sunset and
+  sunrise instead of reporting the string `unavailable` as a value.

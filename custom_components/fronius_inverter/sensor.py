@@ -1,51 +1,41 @@
 """Support for the Fronius Inverter."""
+from __future__ import annotations
+
+import asyncio
 import logging
 from datetime import timedelta
 
-import requests
-import voluptuous as vol
-import json
 import aiohttp
-import asyncio
+import voluptuous as vol
 
-from homeassistant.helpers.aiohttp_client import async_get_clientsession
 import homeassistant.helpers.config_validation as cv
-
 from homeassistant.components.sensor import (
-    PLATFORM_SCHEMA, SensorEntity, SensorDeviceClass, SensorStateClass
+    PLATFORM_SCHEMA,
+    SensorDeviceClass,
+    SensorEntity,
+    SensorStateClass,
 )
-
 from homeassistant.const import (
-    CONF_MONITORED_CONDITIONS, CONF_NAME, CONF_SCAN_INTERVAL, ATTR_ATTRIBUTION,
-    SUN_EVENT_SUNRISE, SUN_EVENT_SUNSET, STATE_UNAVAILABLE
+    ATTR_ATTRIBUTION,
+    CONF_MONITORED_CONDITIONS,
+    CONF_NAME,
+    CONF_SCAN_INTERVAL,
+    SUN_EVENT_SUNRISE,
+    SUN_EVENT_SUNSET,
 )
-
-STATE_CLASS_MEASUREMENT = SensorStateClass.MEASUREMENT  # Represents instantaneous measurements
-STATE_CLASS_TOTAL_INCREASING = SensorStateClass.TOTAL_INCREASING  # Represents continuously increasing values
-
-# Updated variables with new import locations
-DEVICE_CLASS_POWER = SensorDeviceClass.POWER  # Represents power measurement
-DEVICE_CLASS_ENERGY = SensorDeviceClass.ENERGY  # Represents energy measurement
-DEVICE_CLASS_VOLTAGE = SensorDeviceClass.VOLTAGE  # Represents voltage measurement
-DEVICE_CLASS_CURRENT = SensorDeviceClass.CURRENT  # Represents current measurement
-
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.event import async_track_time_interval
-from homeassistant.helpers.entity import Entity
-from homeassistant.util.dt import utcnow as dt_utcnow, as_local
-from homeassistant.util import dt as dt_util
 from homeassistant.helpers.sun import get_astral_event_date
+from homeassistant.util import dt as dt_util
 
-# _INVERTERRT_URL = 'http://{}/solar_api/v1/GetInverterRealtimeData.cgi?Scope={}&DeviceId={}&DataCollection=CommonInverterData'
 _INVERTERRT_URL = 'http://{}/solar_api/v1/GetInverterRealtimeData.cgi?Scope={}&DeviceId={}&DataCollection={}'
 _POWERFLOW_URL = 'http://{}/solar_api/v1/GetPowerFlowRealtimeData.fcgi'
 _METER_URL = 'http://{}/solar_api/v1/GetMeterRealtimeData.cgi?Scope={}&DeviceId={}'
-#_INVERTERRT_URL = 'http://{}{}?DeviceId={}&DataCollection=CommonInverterData'
-#_POWERFLOW_URL = 'http://{}PowerFlow'
+_ARCHIVE_URL = 'http://{}/solar_api/v1/GetArchiveData.cgi?Scope=System&StartDate={}&EndDate={}{}'
 _LOGGER = logging.getLogger(__name__)
 
 ATTRIBUTION = "Fronius Inverter Data"
 
-CONF_NAME = 'name'
 CONF_IP_ADDRESS = 'ip_address'
 CONF_MODEL = 'model'
 CONF_DEVICE_ID = 'device_id'
@@ -56,331 +46,319 @@ CONF_POWERFLOW = 'powerflow'
 CONF_SMARTMETER = 'smartmeter'
 CONF_SMARTMETER_DEVICE_ID = 'smartmeter_device_id'
 CONF_ALWAYS_LOG = 'always_log'
+CONF_STRINGS = 'strings'
 
 DEFAULT_SCAN_INTERVAL = timedelta(seconds=60)
+# The Datamanager archive only gets a new sample every 5 minutes
+ARCHIVE_SCAN_INTERVAL = timedelta(minutes=5)
+ARCHIVE_STEP_SECONDS = 300
+# A sample older than this means the inverter is asleep (night)
+ARCHIVE_STALE_SECONDS = 20 * 60
+REQUEST_TIMEOUT = aiohttp.ClientTimeout(total=10)
+ARCHIVE_TIMEOUT = aiohttp.ClientTimeout(total=30)
 
 SCOPE_TYPES = ['Device', 'System']
 UNIT_TYPES = ['Wh', 'kWh', 'MWh']
 POWER_UNIT_TYPES = ['W', 'kW', 'MW']
 MODEL_TYPES = ['symo', 'gen24']
 
+STRING_CHANNELS = [
+    'Current_DC_String_1', 'Voltage_DC_String_1',
+    'Current_DC_String_2', 'Voltage_DC_String_2',
+    'Temperature_Powerstage',
+]
+
+# Fronius StatusCode values (Solar API v1 spec)
+STATUS_CODES = {
+    0: 'Startup', 1: 'Startup', 2: 'Startup', 3: 'Startup', 4: 'Startup',
+    5: 'Startup', 6: 'Startup', 7: 'Running', 8: 'Standby',
+    9: 'Bootloading', 10: 'Error', 11: 'Idle', 12: 'Ready', 13: 'Sleeping',
+    255: 'Unknown',
+}
+
 # Key: ['device', 'system', 'json_key', 'name', 'unit', 'convert_units', 'icon']
+# convert_units: 'power' / 'energy' (user selectable unit), 'day_energy'
+# (always kWh), 'voltage' / 'current' / 'frequency' / 'temperature' (device
+# class only), 'status' (text) or False.
 SENSOR_TYPES = {
     'year_energy': ['inverter', True, 'YEAR_ENERGY', 'Year Energy', 'MWh', 'energy', 'mdi:solar-power'],
     'total_energy': ['inverter', True, 'TOTAL_ENERGY', 'Total Energy', 'MWh', 'energy', 'mdi:solar-power'],
     'ac_power': ['inverter', True, 'PAC', 'AC Power', 'W', 'power', 'mdi:solar-power'],
-    'day_energy': ['inverter', True, 'DAY_ENERGY', 'Day Energy', 'kWh', 'energy', 'mdi:solar-power'],
-    'ac_current': ['inverter', False, 'IAC', 'AC Current', 'A', False, 'mdi:solar-power'],
-    'ac_1': ['ppp_inverter', False, 'IAC_L1', 'AC_1', 'A', False, 'mdi:solar-power'],
-    'ac_2': ['ppp_inverter', False, 'IAC_L2', 'AC_2', 'A', False, 'mdi:solar-power'],
-    'ac_3': ['ppp_inverter', False, 'IAC_L2', 'AC_3', 'A', False, 'mdi:solar-power'],
-    'ac_voltage': ['inverter', False, 'UAC', 'AC Voltage', 'V', False, 'mdi:solar-power'],
-    'ac_1_voltage': ['ppp_inverter', False, 'UAC_L1', 'AC_1 Voltage', 'V', False, 'mdi:solar-power'],
-    'ac_2_voltage': ['ppp_inverter', False, 'UAC_L2', 'AC_2 Voltage', 'V', False, 'mdi:solar-power'],
-    'ac_3_voltage': ['ppp_inverter', False, 'UAC_L3', 'AC_3 Voltage', 'V', False, 'mdi:solar-power'],
-    'ac_frequency': ['inverter', False, 'FAC', 'AC Frequency', 'Hz', False, 'mdi:solar-power'],
-    'dc_current': ['inverter', False, 'IDC', 'DC Current', 'A', False, 'mdi:solar-power'],
-    'dc_voltage': ['inverter', False, 'UDC', 'DC Voltage', 'V', False, 'mdi:solar-power'],
+    'day_energy': ['inverter', True, 'DAY_ENERGY', 'Day Energy', 'kWh', 'day_energy', 'mdi:solar-power'],
+    'ac_current': ['inverter', False, 'IAC', 'AC Current', 'A', 'current', 'mdi:solar-power'],
+    'ac_1': ['ppp_inverter', False, 'IAC_L1', 'AC_1', 'A', 'current', 'mdi:solar-power'],
+    'ac_2': ['ppp_inverter', False, 'IAC_L2', 'AC_2', 'A', 'current', 'mdi:solar-power'],
+    'ac_3': ['ppp_inverter', False, 'IAC_L3', 'AC_3', 'A', 'current', 'mdi:solar-power'],
+    'ac_voltage': ['inverter', False, 'UAC', 'AC Voltage', 'V', 'voltage', 'mdi:solar-power'],
+    'ac_1_voltage': ['ppp_inverter', False, 'UAC_L1', 'AC_1 Voltage', 'V', 'voltage', 'mdi:solar-power'],
+    'ac_2_voltage': ['ppp_inverter', False, 'UAC_L2', 'AC_2 Voltage', 'V', 'voltage', 'mdi:solar-power'],
+    'ac_3_voltage': ['ppp_inverter', False, 'UAC_L3', 'AC_3 Voltage', 'V', 'voltage', 'mdi:solar-power'],
+    'ac_frequency': ['inverter', False, 'FAC', 'AC Frequency', 'Hz', 'frequency', 'mdi:solar-power'],
+    'dc_current': ['inverter', False, 'IDC', 'DC Current', 'A', 'current', 'mdi:solar-power'],
+    'dc_voltage': ['inverter', False, 'UDC', 'DC Voltage', 'V', 'voltage', 'mdi:solar-power'],
+    'status_code': ['inverter_status', False, 'StatusCode', 'Status', None, 'status', 'mdi:information-outline'],
+    'error_code': ['inverter_status', False, 'ErrorCode', 'Error Code', None, False, 'mdi:alert-circle-outline'],
     'grid_usage': ['powerflow', False, 'P_Grid', 'Grid Usage', 'W', 'power', 'mdi:solar-power'],
     'house_load': ['powerflow', False, 'P_Load', 'House Load', 'W', 'power', 'mdi:solar-power'],
     'panel_status': ['powerflow', False, 'P_PV', 'Panel Status', 'W', 'power', 'mdi:solar-panel'],
     'rel_autonomy': ['powerflow', False, 'rel_Autonomy', 'Relative Autonomy', '%', False, 'mdi:solar-panel'],
     'rel_selfconsumption': ['powerflow', False, 'rel_SelfConsumption', ' Relative Self Consumption', '%', False, 'mdi:solar-panel'],
-    'smartmeter_current_ac_phase_one': ['smartmeter', False, 'Current_AC_Phase_1', 'SmartMeter Current AC Phase 1', 'A', False, 'mdi:solar-power'],
-    'smartmeter_current_ac_phase_two': ['smartmeter', False, 'Current_AC_Phase_2', 'SmartMeter Current AC Phase 2', 'A', False, 'mdi:solar-power'],
-    'smartmeter_current_ac_phase_three': ['smartmeter', False, 'Current_AC_Phase_3', 'SmartMeter Current AC Phase 3', 'A', False, 'mdi:solar-power'],
-    'smartmeter_voltage_ac_phase_one': ['smartmeter', False, 'Voltage_AC_Phase_1', 'SmartMeter Voltage AC Phase 1', 'V', False, 'mdi:solar-power'],
-    'smartmeter_voltage_ac_phase_two': ['smartmeter', False, 'Voltage_AC_Phase_2', 'SmartMeter Voltage AC Phase 2', 'V', False, 'mdi:solar-power'],
-    'smartmeter_voltage_ac_phase_three': ['smartmeter', False, 'Voltage_AC_Phase_3', 'SmartMeter Voltage AC Phase 3', 'V', False, 'mdi:solar-power'],
+    'smartmeter_current_ac_phase_one': ['smartmeter', False, 'Current_AC_Phase_1', 'SmartMeter Current AC Phase 1', 'A', 'current', 'mdi:solar-power'],
+    'smartmeter_current_ac_phase_two': ['smartmeter', False, 'Current_AC_Phase_2', 'SmartMeter Current AC Phase 2', 'A', 'current', 'mdi:solar-power'],
+    'smartmeter_current_ac_phase_three': ['smartmeter', False, 'Current_AC_Phase_3', 'SmartMeter Current AC Phase 3', 'A', 'current', 'mdi:solar-power'],
+    'smartmeter_voltage_ac_phase_one': ['smartmeter', False, 'Voltage_AC_Phase_1', 'SmartMeter Voltage AC Phase 1', 'V', 'voltage', 'mdi:solar-power'],
+    'smartmeter_voltage_ac_phase_two': ['smartmeter', False, 'Voltage_AC_Phase_2', 'SmartMeter Voltage AC Phase 2', 'V', 'voltage', 'mdi:solar-power'],
+    'smartmeter_voltage_ac_phase_three': ['smartmeter', False, 'Voltage_AC_Phase_3', 'SmartMeter Voltage AC Phase 3', 'V', 'voltage', 'mdi:solar-power'],
     'smartmeter_energy_ac_consumed': ['smartmeter', False, 'EnergyReal_WAC_Sum_Consumed', 'SmartMeter Energy AC Consumed', 'Wh', 'energy', 'mdi:solar-power'],
-    'smartmeter_energy_ac_sold': ['smartmeter', False, 'EnergyReal_WAC_Sum_Produced', 'SmartMeter Energy AC Sold', 'Wh', 'energy', 'mdi:solar-power']
+    'smartmeter_energy_ac_sold': ['smartmeter', False, 'EnergyReal_WAC_Sum_Produced', 'SmartMeter Energy AC Sold', 'Wh', 'energy', 'mdi:solar-power'],
+    # Per-MPPT string data from the Datamanager archive (5 minute samples)
+    'string_1_current': ['strings', False, 'Current_DC_String_1', 'String 1 Current', 'A', 'current', 'mdi:solar-panel'],
+    'string_1_voltage': ['strings', False, 'Voltage_DC_String_1', 'String 1 Voltage', 'V', 'voltage', 'mdi:solar-panel'],
+    'string_1_power': ['strings', False, 'Power_DC_String_1', 'String 1 Power', 'W', 'dc_power', 'mdi:solar-panel'],
+    'string_1_day_energy': ['strings', False, 'Energy_DC_String_1', 'String 1 Day Energy', 'kWh', 'dc_energy', 'mdi:solar-panel'],
+    'string_2_current': ['strings', False, 'Current_DC_String_2', 'String 2 Current', 'A', 'current', 'mdi:solar-panel'],
+    'string_2_voltage': ['strings', False, 'Voltage_DC_String_2', 'String 2 Voltage', 'V', 'voltage', 'mdi:solar-panel'],
+    'string_2_power': ['strings', False, 'Power_DC_String_2', 'String 2 Power', 'W', 'dc_power', 'mdi:solar-panel'],
+    'string_2_day_energy': ['strings', False, 'Energy_DC_String_2', 'String 2 Day Energy', 'kWh', 'dc_energy', 'mdi:solar-panel'],
+    'powerstage_temperature': ['strings', False, 'Temperature_Powerstage', 'Powerstage Temperature', '°C', 'temperature', 'mdi:thermometer'],
 }
 # the gen24 inverter has different names for some sensors
 SENSOR_TYPES_GEN24 = {
-    'smartmeter_current_ac_phase_one': ['smartmeter', False, 'ACBRIDGE_CURRENT_ACTIVE_MEAN_01_F32', 'SmartMeter Current AC Phase 1', 'A', False, 'mdi:solar-power'],
-    'smartmeter_current_ac_phase_two': ['smartmeter', False, 'ACBRIDGE_CURRENT_ACTIVE_MEAN_02_F32', 'SmartMeter Current AC Phase 2', 'A', False, 'mdi:solar-power'],
-    'smartmeter_current_ac_phase_three': ['smartmeter', False, 'ACBRIDGE_CURRENT_ACTIVE_MEAN_03_F32', 'SmartMeter Current AC Phase 3', 'A', False, 'mdi:solar-power'],
-    'smartmeter_voltage_ac_phase_one': ['smartmeter', False, 'SMARTMETER_VOLTAGE_01_F64', 'SmartMeter Voltage AC Phase 1', 'V', False, 'mdi:solar-power'],
-    'smartmeter_voltage_ac_phase_two': ['smartmeter', False, 'SMARTMETER_VOLTAGE_02_F64', 'SmartMeter Voltage AC Phase 2', 'V', False, 'mdi:solar-power'],
-    'smartmeter_voltage_ac_phase_three': ['smartmeter', False, 'SMARTMETER_VOLTAGE_03_F64', 'SmartMeter Voltage AC Phase 3', 'V', False, 'mdi:solar-power'],
+    'smartmeter_current_ac_phase_one': ['smartmeter', False, 'ACBRIDGE_CURRENT_ACTIVE_MEAN_01_F32', 'SmartMeter Current AC Phase 1', 'A', 'current', 'mdi:solar-power'],
+    'smartmeter_current_ac_phase_two': ['smartmeter', False, 'ACBRIDGE_CURRENT_ACTIVE_MEAN_02_F32', 'SmartMeter Current AC Phase 2', 'A', 'current', 'mdi:solar-power'],
+    'smartmeter_current_ac_phase_three': ['smartmeter', False, 'ACBRIDGE_CURRENT_ACTIVE_MEAN_03_F32', 'SmartMeter Current AC Phase 3', 'A', 'current', 'mdi:solar-power'],
+    'smartmeter_voltage_ac_phase_one': ['smartmeter', False, 'SMARTMETER_VOLTAGE_01_F64', 'SmartMeter Voltage AC Phase 1', 'V', 'voltage', 'mdi:solar-power'],
+    'smartmeter_voltage_ac_phase_two': ['smartmeter', False, 'SMARTMETER_VOLTAGE_02_F64', 'SmartMeter Voltage AC Phase 2', 'V', 'voltage', 'mdi:solar-power'],
+    'smartmeter_voltage_ac_phase_three': ['smartmeter', False, 'SMARTMETER_VOLTAGE_03_F64', 'SmartMeter Voltage AC Phase 3', 'V', 'voltage', 'mdi:solar-power'],
     'smartmeter_energy_ac_consumed': ['smartmeter', False, 'SMARTMETER_ENERGYACTIVE_CONSUMED_SUM_F64', 'SmartMeter Energy AC Consumed', 'Wh', 'energy', 'mdi:solar-power'],
-    'smartmeter_energy_ac_sold': ['smartmeter', False, 'SMARTMETER_ENERGYACTIVE_PRODUCED_SUM_F64', 'SmartMeter Energy AC Sold', 'Wh', 'energy', 'mdi:solar-power']
+    'smartmeter_energy_ac_sold': ['smartmeter', False, 'SMARTMETER_ENERGYACTIVE_PRODUCED_SUM_F64', 'SmartMeter Energy AC Sold', 'Wh', 'energy', 'mdi:solar-power'],
 }
+
+# convert_units -> (device_class, state_class)
+_CLASSES = {
+    'power': (SensorDeviceClass.POWER, SensorStateClass.MEASUREMENT),
+    'dc_power': (SensorDeviceClass.POWER, SensorStateClass.MEASUREMENT),
+    'energy': (SensorDeviceClass.ENERGY, SensorStateClass.TOTAL_INCREASING),
+    'day_energy': (SensorDeviceClass.ENERGY, SensorStateClass.TOTAL_INCREASING),
+    'dc_energy': (SensorDeviceClass.ENERGY, SensorStateClass.TOTAL_INCREASING),
+    'voltage': (SensorDeviceClass.VOLTAGE, SensorStateClass.MEASUREMENT),
+    'current': (SensorDeviceClass.CURRENT, SensorStateClass.MEASUREMENT),
+    'frequency': (SensorDeviceClass.FREQUENCY, SensorStateClass.MEASUREMENT),
+    'temperature': (SensorDeviceClass.TEMPERATURE, SensorStateClass.MEASUREMENT),
+}
+
+_SCALE = {'W': 1, 'kW': 1e3, 'MW': 1e6, 'Wh': 1, 'kWh': 1e3, 'MWh': 1e6}
 
 PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend({
     vol.Required(CONF_IP_ADDRESS): cv.string,
-    vol.Optional(CONF_MODEL, default="symo"):
-        vol.In(MODEL_TYPES),
+    vol.Optional(CONF_MODEL, default="symo"): vol.In(MODEL_TYPES),
     vol.Optional(CONF_DEVICE_ID, default='1'): cv.string,
     vol.Optional(CONF_NAME, default='Fronius'): cv.string,
-    vol.Optional(CONF_SCOPE, default='Device'):
-        vol.In(SCOPE_TYPES),
-    vol.Optional(CONF_UNITS, default='MWh'):
-        vol.In(UNIT_TYPES),
-    vol.Optional(CONF_POWER_UNITS, default='W'):
-        vol.In(POWER_UNIT_TYPES),
+    vol.Optional(CONF_SCOPE, default='Device'): vol.In(SCOPE_TYPES),
+    vol.Optional(CONF_UNITS, default='MWh'): vol.In(UNIT_TYPES),
+    vol.Optional(CONF_POWER_UNITS, default='W'): vol.In(POWER_UNIT_TYPES),
     vol.Optional(CONF_POWERFLOW, default=False): cv.boolean,
     vol.Optional(CONF_MONITORED_CONDITIONS, default=list(SENSOR_TYPES)):
         vol.All(cv.ensure_list, [vol.In(SENSOR_TYPES)]),
     vol.Optional(CONF_SMARTMETER, default=False): cv.boolean,
     vol.Optional(CONF_SMARTMETER_DEVICE_ID, default='0'): cv.string,
     vol.Optional(CONF_ALWAYS_LOG, default=True): cv.boolean,
+    vol.Optional(CONF_STRINGS, default=False): cv.boolean,
 })
+
 
 async def async_setup_platform(hass, config, async_add_entities, discovery_info=None):
     """Set up the Fronius inverter sensor."""
-
     session = async_get_clientsession(hass)
     ip_address = config[CONF_IP_ADDRESS]
     model = config[CONF_MODEL]
-    device_id = config.get(CONF_DEVICE_ID)
-    scope = config.get(CONF_SCOPE)
-    units = config.get(CONF_UNITS)
-    power_units = config.get(CONF_POWER_UNITS)
-    name = config.get(CONF_NAME)
-    powerflow = config.get(CONF_POWERFLOW)
-    smartmeter = config.get(CONF_SMARTMETER)
-    smartmeter_device_id = config.get(CONF_SMARTMETER_DEVICE_ID)
+    device_id = config[CONF_DEVICE_ID]
+    scope = config[CONF_SCOPE]
+    units = config[CONF_UNITS]
+    power_units = config[CONF_POWER_UNITS]
+    name = config[CONF_NAME]
+    powerflow = config[CONF_POWERFLOW]
+    smartmeter = config[CONF_SMARTMETER]
+    smartmeter_device_id = config[CONF_SMARTMETER_DEVICE_ID]
     scan_interval = config.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL)
-    always_log = config.get(CONF_ALWAYS_LOG)
+    always_log = config[CONF_ALWAYS_LOG]
+    strings = config[CONF_STRINGS]
 
+    # Per-platform copy: gen24 overrides must not leak into other instances
+    sensor_types = dict(SENSOR_TYPES)
     if model == 'gen24':
         _LOGGER.debug("GEN24 configured, updating sensor list")
-        # update sensors since gen24 has different names for some of them
-        for variable in SENSOR_TYPES:
-            if variable in SENSOR_TYPES_GEN24:
-                SENSOR_TYPES[variable] = SENSOR_TYPES_GEN24[variable]
-    _LOGGER.debug(SENSOR_TYPES)
+        sensor_types.update(SENSOR_TYPES_GEN24)
 
-    fetchers = []
     inverter_data = InverterData(session, ip_address, device_id, 'CommonInverterData', scope)
-    fetchers.append(inverter_data)
-    ppp_inverter_data = InverterData(session, ip_address, device_id, '3PInverterData', scope)
-    fetchers.append(ppp_inverter_data)
-    
+    fetchers = {
+        'inverter': (inverter_data, scan_interval),
+        'inverter_status': (inverter_data, None),
+        'ppp_inverter': (InverterData(session, ip_address, device_id, '3PInverterData', scope), scan_interval),
+    }
     if powerflow:
-        powerflow_data = PowerflowData(session, ip_address, None, None, None)
-        fetchers.append(powerflow_data)
+        fetchers['powerflow'] = (PowerflowData(session, ip_address, None, None, None), scan_interval)
     if smartmeter:
-        smartmeter_data = SmartMeterData(session, ip_address, smartmeter_device_id, None, "Device")
-        fetchers.append(smartmeter_data)
-
-    def fetch_executor(fetcher):
-        async def fetch_data(*_):
-            await fetcher.async_update()
-        return fetch_data
-
-    for fetcher in fetchers:
-        fetch = fetch_executor(fetcher)
-        await fetch()
-        async_track_time_interval(hass, fetch, scan_interval)
+        fetchers['smartmeter'] = (SmartMeterData(session, ip_address, smartmeter_device_id, None, 'Device'), scan_interval)
+    if strings:
+        fetchers['strings'] = (ArchiveData(session, ip_address, device_id, None, None), ARCHIVE_SCAN_INTERVAL)
 
     dev = []
+    used = set()
     for variable in config[CONF_MONITORED_CONDITIONS]:
-
-        device = SENSOR_TYPES[variable][0]
-        system = SENSOR_TYPES[variable][1]
-        sensor_units = SENSOR_TYPES[variable][4]
-        convert_units = SENSOR_TYPES[variable][5]
-
+        device = sensor_types[variable][0]
+        if device not in fetchers:
+            _LOGGER.warning("Sensor %s needs '%s: true' in the configuration, skipped", variable, device)
+            continue
+        fetcher = fetchers[device][0]
+        convert_units = sensor_types[variable][5]
+        sensor_units = sensor_types[variable][4]
         if convert_units == 'power':
             sensor_units = power_units
         elif convert_units == 'energy':
             sensor_units = units
+        used.add(device)
+        dev.append(FroniusSensor(fetcher, name, sensor_types[variable], variable, scope, sensor_units, always_log))
 
-        sensor = "sensor." + name + "_" + SENSOR_TYPES[variable][3]
-        state = hass.states.get(sensor)
+    # Only poll the endpoints that feed at least one sensor
+    polled = set()
+    for device in used:
+        fetcher, interval = fetchers[device]
+        if interval is None:
+            interval = fetchers['inverter'][1]
+        if id(fetcher) in polled:
+            continue
+        polled.add(id(fetcher))
+        await fetcher.async_update()
 
-        if device == "inverter":
-            _LOGGER.debug("Adding inverter sensor: {}, {}, {}, {}, {}, {}, {}, {}".format(inverter_data, name, variable, scope, sensor_units, device_id, powerflow, smartmeter))
-            dev.append(FroniusSensor(inverter_data, name, variable, scope, sensor_units, device_id, powerflow, smartmeter, always_log))
+        async def _poll(_now, fetcher=fetcher):
+            await fetcher.async_update()
 
-        if device == "ppp_inverter":
-            _LOGGER.debug("Adding ppp_inverter sensor: {}, {}, {}, {}, {}, {}, {}, {}".format(inverter_data, name, variable, scope, sensor_units, device_id, powerflow, smartmeter))
-            dev.append(FroniusSensor(ppp_inverter_data, name, variable, scope, sensor_units, device_id, powerflow, smartmeter, always_log))
-
-        elif device == "powerflow" and powerflow:
-            _LOGGER.debug("Adding powerflow sensor: {}, {}, {}, {}, {}, {}, {}, {}".format(powerflow_data, name, variable, scope, sensor_units, device_id, powerflow, smartmeter))
-            dev.append(FroniusSensor(powerflow_data, name, variable, scope, sensor_units, device_id, powerflow, smartmeter, always_log))
-
-        elif device == "smartmeter" and smartmeter:
-            _LOGGER.debug("Adding meter sensor: {}, {}, {}, {}, {}, {}, {}, {}".format(smartmeter_data, name, variable, scope, sensor_units, device_id, powerflow, smartmeter))
-            dev.append(FroniusSensor(smartmeter_data, name, variable, scope, sensor_units, device_id, powerflow, smartmeter, always_log))
+        async_track_time_interval(hass, _poll, interval)
 
     async_add_entities(dev, True)
+
 
 class FroniusSensor(SensorEntity):
     """Implementation of the Fronius inverter sensor."""
 
-    def __init__(self, device_data, name, sensor_type, scope, units, device_id, powerflow, smartmeter, always_log):
+    _attr_should_poll = False
+
+    def __init__(self, device_data, name, sensor_def, sensor_type, scope, units, always_log):
         """Initialize the sensor."""
         self._client = name
-        self._device = SENSOR_TYPES[sensor_type][0]
-        self._json_key = SENSOR_TYPES[sensor_type][2]
-        self._name = SENSOR_TYPES[sensor_type][3]
+        self._device = sensor_def[0]
+        self._json_key = sensor_def[2]
+        self._name = sensor_def[3]
         self._type = sensor_type
-        self._state = None
-        self._device_id = device_id
         self._scope = scope
         self._units = units
-        self._unit = SENSOR_TYPES[sensor_type][4]
-        self._convert_units = SENSOR_TYPES[sensor_type][5]
+        self._convert_units = sensor_def[5]
         self._data = device_data
-        self._icon = SENSOR_TYPES[sensor_type][6]
-        self._powerflow = powerflow
-        self._smartmeter = smartmeter
         self._always_log = always_log
+        self._value = None
 
-        # add attributes to support Energy dashboard and statistics for power sensors, new in HA 2021.8
-        # and updated in 2021.9 due to bugs in the orginal HA implementation.
-        # ref https://developers.home-assistant.io/docs/core/entity/sensor/
-        if self._convert_units == "power":
-            self._attr_device_class = DEVICE_CLASS_POWER
-            self._attr_state_class = STATE_CLASS_MEASUREMENT
-        elif self._convert_units == "energy":
-            self._attr_device_class = DEVICE_CLASS_ENERGY
-            self._attr_state_class = STATE_CLASS_TOTAL_INCREASING
-
-    @property
-    def name(self):
-        """Return the name of the sensor."""
-        return '{} {}'.format(self._client, self._name)
+        self._attr_name = f'{name} {self._name}'
+        # Keep the historic unique_id format so existing entities and their
+        # statistics survive the upgrade
+        self._attr_unique_id = f'{name} {self._name}'
+        self._attr_icon = sensor_def[6]
+        self._attr_native_unit_of_measurement = units
+        if self._convert_units in _CLASSES:
+            self._attr_device_class, self._attr_state_class = _CLASSES[self._convert_units]
+        elif self._convert_units == 'status':
+            self._attr_device_class = SensorDeviceClass.ENUM
+            self._attr_options = sorted(set(STATUS_CODES.values()))
 
     @property
-    def state(self):
+    def native_value(self):
         """Return the state of the device."""
-        return self._state
+        return self._value
 
     @property
-    def available(self, utcnow=None):
-        if self._always_log:
-            return True
-
-        if utcnow is None:
-            utcnow = dt_utcnow()
-        now = as_local(utcnow)
-
-        start_time = self.find_start_time(now)
-        stop_time = self.find_stop_time(now)
-
-        if as_local(start_time) <= now <= as_local(stop_time):
-            _LOGGER.debug("Sensor is running. Start/Stop time: {}, {}".format(as_local(start_time), as_local(stop_time)))
-            return True
-        else:
-            _LOGGER.debug("Sensor is not running. Start/Stop time: {}, {}".format(as_local(start_time), as_local(stop_time)))
+    def available(self):
+        """Return True when the last fetch succeeded (and the sun is up, if configured)."""
+        if not self._data.available:
             return False
-
-    @property
-    def unique_id(self):
-        """Return the unique id."""
-        return f"{self._client} {self._name}"
-
-    @property
-    def unit_of_measurement(self):
-        """Return the unit of measurement of this entity, if any."""
-        if self._convert_units:
-            return self._units
-        else:
-            return self._unit
+        if self._always_log or self.hass is None:
+            return True
+        now = dt_util.now()
+        sunrise = get_astral_event_date(self.hass, SUN_EVENT_SUNRISE, now.date())
+        sunset = get_astral_event_date(self.hass, SUN_EVENT_SUNSET, now.date())
+        if sunrise is None or sunset is None:
+            return True
+        return dt_util.as_local(sunrise) <= now <= dt_util.as_local(sunset)
 
     @property
     def extra_state_attributes(self):
         """Return the state attributes."""
         attrs = {ATTR_ATTRIBUTION: ATTRIBUTION}
+        if self._device == 'strings' and self._data.sample_time is not None:
+            attrs['sample_time'] = self._data.sample_time.isoformat()
+        if self._convert_units == 'status' and self._data.latest_data:
+            status = self._data.latest_data.get('DeviceStatus') or {}
+            attrs['status_code'] = status.get('StatusCode')
         return attrs
 
-    @property
-    def icon(self):
-        """Icon to use in the frontend, if any."""
-        return self._icon
+    def _raw_value(self):
+        """Extract the raw value for this sensor from the fetcher data."""
+        data = self._data.latest_data
+        if not data:
+            return None
+        if self._device == 'inverter_status':
+            status = data.get('DeviceStatus')
+            return None if status is None else status.get(self._json_key)
+        if self._json_key not in data:
+            return None
+        item = data[self._json_key]
+        if self._device in ('inverter', 'ppp_inverter'):
+            if self._scope == 'System':
+                # Sum the values of all inverters; null counts as 0
+                return sum(v or 0 for v in (item.get('Values') or {}).values())
+            return item.get('Value') or 0
+        # powerflow, smartmeter: plain values; null counts as 0
+        return item or 0
 
-    @property
-    def should_poll(self):
-        """Device should not be polled, returns False."""
-        return False
-
-    async def async_update(self, utcnow=None):
-        """Get the latest data from inverter and update the states."""
-        if not self.available:
-            self._state = STATE_UNAVAILABLE
+    def _update_value(self):
+        if self._device == 'strings':
+            # None here means "no sample" (night), not a fetch failure
+            state = (self._data.latest_data or {}).get(self._json_key)
+            self._value = None if state is None else round(state, 3)
             return
-
-        state = None
-        if self._data.latest_data and (self._json_key in self._data.latest_data):
-            _LOGGER.debug("Device: {}".format(self._device))
-            if self._device == 'inverter' or self._device == 'ppp_inverter':
-                # Read data, if a value is 'null' convert it to 0
-                if self._scope == 'Device':
-                    state = self._data.latest_data[self._json_key]['Value']
-                    if state is None:
-                        _LOGGER.debug(">>>>> Converting {} from null to 0".format(self._json_key))
-                        state = 0
-                elif self._scope == 'System':
-                    for item in self._data.latest_data[self._json_key]['Values']:
-                        value = self._data.latest_data[self._json_key]['Values'][item]
-                        if value is None:
-                            _LOGGER.debug(">>>>> Converting {} from null to 0".format(self._json_key))
-                            value = 0
-                        state = state + value
-            elif self._device == 'powerflow' or self._device == 'smartmeter':
-                # Read data directly, if it is 'null' convert it to 0
-                state = self._data.latest_data[self._json_key]
-                if state is None:
-                    _LOGGER.debug(">>>>> Converting {} from null to 0".format(self._json_key))
-                    state = 0
-            _LOGGER.debug("State: {}".format(state))
-
-        # convert and round the result
-        if state is not None:
-            _LOGGER.debug("Sensor: {}".format(self._json_key))
-            if self._convert_units == "energy":
-                _LOGGER.debug("Converting energy ({}) to {}".format(state, self._units))
-                if self._units == "MWh":
-                    self._state = round(state / 1000000, 2)
-                elif self._units == "kWh":
-                    self._state = round(state / 1000, 2)
-                else:
-                    self._state = round(state, 2)
-            elif self._convert_units == "power":
-                _LOGGER.debug("Converting power ({}) to {}".format(state, self._units))
-                if self._units == "MW":
-                    self._state = round(state / 1000000, 2)
-                elif self._units == "kW":
-                    self._state = round(state / 1000, 2)
-                else:
-                    self._state = round(state, 2)
-            elif self._json_key == "DAY_ENERGY":
-                # day energy always gets converted to kWh
-                _LOGGER.debug("Converting day energy to kWh ({})".format(state))
-                self._state = round(state / 1000, 2)
-            else:
-                _LOGGER.debug("Rounding ({}) to two decimals".format(state))
-                self._state = round(state, 2)
+        state = self._raw_value()
+        if state is None:
+            _LOGGER.debug("State is None for %s", self._json_key)
+            return
+        if self._convert_units == 'status':
+            self._value = STATUS_CODES.get(int(state), 'Unknown')
+        elif self._convert_units in ('energy', 'power'):
+            self._value = round(state / _SCALE[self._units], 3 if self._units != 'W' else 1)
+        elif self._convert_units == 'day_energy':
+            # day energy always gets converted to kWh
+            self._value = round(state / 1000, 3)
+        elif isinstance(state, (int, float)):
+            self._value = round(state, 2)
         else:
-            _LOGGER.debug(">>>>> State is None for {} <<<<<".format(self._json_key))
-            _LOGGER.debug("Latest data: {}".format(self._data.latest_data))
-        _LOGGER.debug("State converted ({})".format(self._state))
+            self._value = state
 
     async def async_added_to_hass(self):
         """Register at data provider for updates."""
-        await self._data.register(self)
+        self._data.register(self)
+        self._update_value()
 
-    def __hash__(self):
-        """Hash sensor by hashing its name."""
-        return hash(self.name)
+    async def async_will_remove_from_hass(self):
+        """Unregister from the data provider."""
+        self._data.unregister(self)
 
-    def find_start_time(self, now):
-        """Return sunrise or start_time if given."""
-        sunrise = get_astral_event_date(self.hass, SUN_EVENT_SUNRISE, now.date())
-        return sunrise
+    async def async_update(self):
+        """Refresh the value from the shared fetcher data."""
+        self._update_value()
 
-    def find_stop_time(self, now):
-        """Return sunset or stop_time if given."""
-        sunset = get_astral_event_date(self.hass, SUN_EVENT_SUNSET, now.date())
-        return sunset
 
 class FroniusFetcher:
     """Handle Fronius API requests."""
+
+    timeout = REQUEST_TIMEOUT
 
     def __init__(self, session, ip_address, device_id, data_collection, scope):
         """Initialize the data object."""
@@ -391,85 +369,152 @@ class FroniusFetcher:
         self._scope = scope
         self._data = None
         self._sensors = set()
+        self._available = False
+        self._failures = 0
+
+    @property
+    def available(self):
+        """Return True if the last update succeeded."""
+        return self._available
 
     async def async_update(self):
         """Retrieve and update latest state."""
+        error = None
         try:
             await self._update()
-        except aiohttp.ClientConnectionError:
-            _LOGGER.error("Failed to update: connection error")
+        except aiohttp.ClientError as err:
+            error = f"connection error ({type(err).__name__})"
         except asyncio.TimeoutError:
-            _LOGGER.error("Failed to update: request timeout")
-        except ValueError:
-            _LOGGER.error("Failed to update: invalid response received")
+            error = "request timeout"
+        except (ValueError, KeyError, TypeError) as err:
+            error = f"invalid response ({type(err).__name__})"
 
-        # Schedule an update for all included sensors
-        for sensor in self._sensors:
-            sensor.async_schedule_update_ha_state(True)
+        if error is None:
+            if self._failures:
+                _LOGGER.info("%s: connection restored after %d failures", type(self).__name__, self._failures)
+            self._failures = 0
+            self._available = True
+        else:
+            self._failures += 1
+            # Log the first failure as a warning, then keep quiet: the Datamanager
+            # is often unreachable at night or during firmware updates
+            log = _LOGGER.warning if self._failures == 1 else _LOGGER.debug
+            log("%s: failed to update: %s", type(self).__name__, error)
+            # Allow one missed poll before marking the sensors unavailable
+            if self._failures > 1:
+                self._available = False
+
+        for sensor in list(self._sensors):
+            if sensor.hass is not None:
+                sensor.async_schedule_update_ha_state(True)
 
     async def fetch_data(self, url):
         """Retrieve data from inverter in async manner."""
         _LOGGER.debug("Requesting data from URL: %s", url)
-        try:
-            response = await self._session.get(url, timeout=10)
+        async with self._session.get(url, timeout=self.timeout) as response:
             if response.status != 200:
-                raise ValueError
-            json_response = await response.json()
-            _LOGGER.debug("Got data from URL: %s\n%s", url, json_response)
-            return json_response
-        except aiohttp.ClientResponseError:
-            raise ValueError
+                raise ValueError(f"HTTP {response.status}")
+            json_response = await response.json(content_type=None)
+        status = (json_response.get('Head') or {}).get('Status') or {}
+        if status.get('Code', 0) != 0:
+            raise ValueError(f"API status {status.get('Code')}: {status.get('Reason')}")
+        return json_response
 
     @property
     def latest_data(self):
         """Return the latest data object."""
-        if self._data:
-            return self._data
-        return None
+        return self._data or None
 
-    async def register(self, sensor):
+    def register(self, sensor):
         """Register child sensor for update subscriptions."""
         self._sensors.add(sensor)
 
-class InverterData(FroniusFetcher):
-    """Handle Fronius API object and limit updates."""
+    def unregister(self, sensor):
+        """Remove a child sensor."""
+        self._sensors.discard(sensor)
 
-    def _build_url(self):
-        """Build the URL for the requests."""
-        url = _INVERTERRT_URL.format(self._ip_address, self._scope, self._device_id, self._data_collection)
-        _LOGGER.debug("Fronius Inverter URL: %s", url)
-        return url
+
+class InverterData(FroniusFetcher):
+    """Inverter realtime data (CommonInverterData / 3PInverterData)."""
 
     async def _update(self):
-        """Get the latest data from inverter."""
-        _LOGGER.debug("Requesting inverter data")
-        self._data = (await self.fetch_data(self._build_url()))['Body']['Data']
+        url = _INVERTERRT_URL.format(self._ip_address, self._scope, self._device_id, self._data_collection)
+        self._data = (await self.fetch_data(url))['Body']['Data']
 
 
 class PowerflowData(FroniusFetcher):
-    """Handle Fronius API object and limit updates."""
-
-    def _build_url(self):
-        """Build the URL for the requests."""
-        url = _POWERFLOW_URL.format(self._ip_address)
-        _LOGGER.debug("Fronius Powerflow URL: %s", url)
-        return url
+    """Powerflow realtime data."""
 
     async def _update(self):
-        """Get the latest data from inverter."""
-        _LOGGER.debug("Requesting powerflow data")
-        self._data = (await self.fetch_data(self._build_url()))['Body']['Data']['Site']
+        url = _POWERFLOW_URL.format(self._ip_address)
+        self._data = (await self.fetch_data(url))['Body']['Data']['Site']
+
 
 class SmartMeterData(FroniusFetcher):
-    """Handle Fronius API object and limit updates."""
-
-    def _build_url(self):
-        """Build the URL for the requests."""
-        url = _METER_URL.format(self._ip_address, self._scope, self._device_id)
-        _LOGGER.debug("Fronius SmartMeter URL: %s", url)
-        return url
+    """Smart meter realtime data."""
 
     async def _update(self):
-        """Get the latest data from inverter."""
-        _LOGGER.debug("Requesting smartmeter data")
-        self._data = (await self.fetch_data(self._build_url()))['Body']['Data']
+        url = _METER_URL.format(self._ip_address, self._scope, self._device_id)
+        self._data = (await self.fetch_data(url))['Body']['Data']
+
+
+class ArchiveData(FroniusFetcher):
+    """Per-string DC data from the Datamanager archive (5 minute samples).
+
+    The realtime API only exposes the summed IDC/UDC; the archive keeps
+    current and voltage per MPPT, which is what is needed to spot shading,
+    soiling or a failing string.
+    """
+
+    timeout = ARCHIVE_TIMEOUT
+
+    def __init__(self, *args):
+        super().__init__(*args)
+        self.sample_time = None
+
+    async def _update(self):
+        today = dt_util.now().date().isoformat()
+        channels = ''.join(f'&Channel={c}' for c in STRING_CHANNELS)
+        url = _ARCHIVE_URL.format(self._ip_address, today, today, channels)
+        body = (await self.fetch_data(url))['Body']['Data']
+        node = body.get(f'inverter/{self._device_id}')
+        if node is None:
+            # Nothing logged yet today (before sunrise)
+            self._data = self._empty()
+            return
+        series = {ch: {int(k): v for k, v in (node['Data'].get(ch) or {}).get('Values', {}).items()}
+                  for ch in STRING_CHANNELS}
+        start = dt_util.parse_datetime(node['Start'])
+        data = {}
+        latest = max((max(s) for s in series.values() if s), default=None)
+        stale = latest is None or (
+            start is not None
+            and (dt_util.now() - (start + timedelta(seconds=latest))).total_seconds() > ARCHIVE_STALE_SECONDS
+        )
+        self.sample_time = None if latest is None or start is None else start + timedelta(seconds=latest)
+        for n in (1, 2):
+            cur, volt = series[f'Current_DC_String_{n}'], series[f'Voltage_DC_String_{n}']
+            # Daily DC energy: each sample is the mean of a 5 minute slot
+            energy = sum((cur[t] or 0) * (volt.get(t) or 0) for t in cur) * ARCHIVE_STEP_SECONDS / 3600
+            data[f'Energy_DC_String_{n}'] = round(energy / 1000, 3)
+            if stale:
+                data[f'Current_DC_String_{n}'] = 0
+                data[f'Voltage_DC_String_{n}'] = 0
+                data[f'Power_DC_String_{n}'] = 0
+            else:
+                i, u = cur.get(latest) or 0, volt.get(latest) or 0
+                data[f'Current_DC_String_{n}'] = i
+                data[f'Voltage_DC_String_{n}'] = u
+                data[f'Power_DC_String_{n}'] = round(i * u, 1)
+        temps = series['Temperature_Powerstage']
+        data['Temperature_Powerstage'] = None if stale or latest not in temps else temps[latest]
+        self._data = data
+
+    @staticmethod
+    def _empty():
+        data = {}
+        for n in (1, 2):
+            for key in ('Current', 'Voltage', 'Power', 'Energy'):
+                data[f'{key}_DC_String_{n}'] = 0
+        data['Temperature_Powerstage'] = None
+        return data
