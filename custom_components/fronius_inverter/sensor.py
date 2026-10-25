@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 import aiohttp
 import voluptuous as vol
@@ -496,11 +496,14 @@ class ArchiveData(FroniusFetcher):
         start = dt_util.parse_datetime(node['Start'])
         data = {}
         latest = max((max(s) for s in series.values() if s), default=None)
-        stale = latest is None or (
-            start is not None
-            and (dt_util.now() - (start + timedelta(seconds=latest))).total_seconds() > ARCHIVE_STALE_SECONDS
+        # Sample keys are local wall-clock seconds since midnight, not elapsed seconds since Start: on a
+        # DST change day Start carries the old UTC offset, so Start + seconds would be an hour off.
+        self.sample_time = None if latest is None or start is None else (
+            datetime.combine(start.date(), datetime.min.time()) + timedelta(seconds=latest)
+        ).replace(tzinfo=dt_util.get_default_time_zone())
+        stale = self.sample_time is None or (
+            (dt_util.now() - self.sample_time).total_seconds() > ARCHIVE_STALE_SECONDS
         )
-        self.sample_time = None if latest is None or start is None else start + timedelta(seconds=latest)
         for n in (1, 2):
             cur, volt = series[f'Current_DC_String_{n}'], series[f'Voltage_DC_String_{n}']
             # Daily DC energy: each sample is the mean of a 5 minute slot
