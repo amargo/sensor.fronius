@@ -56,6 +56,11 @@ ARCHIVE_STEP_SECONDS = 300
 ARCHIVE_STALE_SECONDS = 20 * 60
 REQUEST_TIMEOUT = aiohttp.ClientTimeout(total=10)
 ARCHIVE_TIMEOUT = aiohttp.ClientTimeout(total=30)
+# Lifetime energy counters: readings that break monotonic growth are held back until they repeat this many
+# times in a row (the inverter sometimes reports TOTAL_ENERGY 100x too small for one poll).
+COUNTER_CONFIRM = 10
+COUNTER_SMALL_DROP = 0.05  # relative; restart losing unsaved energy -> hold until the counter catches up
+COUNTER_MAX_RISE_WH = 100000  # one poll can't add 100 kWh
 
 SCOPE_TYPES = ['Device', 'System']
 UNIT_TYPES = ['Wh', 'kWh', 'MWh']
@@ -257,6 +262,7 @@ class FroniusSensor(SensorEntity):
         self._data = device_data
         self._always_log = always_log
         self._value = None
+        self._suspect = 0
 
         self._attr_name = f'{name} {self._name}'
         # Keep the historic unique_id format so existing entities and their
@@ -334,7 +340,9 @@ class FroniusSensor(SensorEntity):
             return
         if self._convert_units == 'status':
             self._value = STATUS_CODES.get(int(state), 'Unknown')
-        elif self._convert_units in ('energy', 'power'):
+        elif self._convert_units == 'energy':
+            self._value = self._guard_counter(round(state / _SCALE[self._units], 3))
+        elif self._convert_units == 'power':
             self._value = round(state / _SCALE[self._units], 3 if self._units != 'W' else 1)
         elif self._convert_units == 'day_energy':
             # day energy always gets converted to kWh
@@ -343,6 +351,27 @@ class FroniusSensor(SensorEntity):
             self._value = round(state, 2)
         else:
             self._value = state
+
+    def _guard_counter(self, value):
+        """Keep TOTAL/YEAR energy monotonic. Small drops (inverter restart) are held until the counter
+        catches up; big drops or jumps are accepted only after COUNTER_CONFIRM consecutive readings
+        (real reset, YEAR_ENERGY on New Year)."""
+        last = self._value
+        if last is None:
+            return value
+        rise_limit = COUNTER_MAX_RISE_WH / _SCALE[self._units]
+        if last <= value <= last + rise_limit:
+            self._suspect = 0
+            return value
+        if value < last and last - value <= last * COUNTER_SMALL_DROP:
+            return last
+        self._suspect += 1
+        if self._suspect >= COUNTER_CONFIRM:
+            _LOGGER.warning("%s: accepting counter change %s -> %s", self._name, last, value)
+            self._suspect = 0
+            return value
+        _LOGGER.warning("%s: ignoring implausible reading %s (last %s)", self._name, value, last)
+        return last
 
     async def async_added_to_hass(self):
         """Register at data provider for updates."""
