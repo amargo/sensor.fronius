@@ -25,6 +25,7 @@ from homeassistant.const import (
 )
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.event import async_track_time_interval
+from homeassistant.helpers.restore_state import RestoreEntity
 from homeassistant.helpers.sun import get_astral_event_date
 from homeassistant.util import dt as dt_util
 
@@ -244,7 +245,7 @@ async def async_setup_platform(hass, config, async_add_entities, discovery_info=
     async_add_entities(dev, True)
 
 
-class FroniusSensor(SensorEntity):
+class FroniusSensor(SensorEntity, RestoreEntity):
     """Implementation of the Fronius inverter sensor."""
 
     _attr_should_poll = False
@@ -375,6 +376,13 @@ class FroniusSensor(SensorEntity):
 
     async def async_added_to_hass(self):
         """Register at data provider for updates."""
+        if self._convert_units == 'energy':
+            # restore the counter so _guard_counter also works on the first reading after a restart
+            last = await self.async_get_last_state()
+            try:
+                self._value = float(last.state)
+            except (AttributeError, TypeError, ValueError):
+                pass
         self._data.register(self)
         self._update_value()
 
